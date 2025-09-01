@@ -1,0 +1,52 @@
+# For Fyers API communication
+fyers-apiv3==3.0.8
+
+# For data manipulation, especially with historical data
+pandas==2.2.2
+
+# For making HTTP requests during authentication
+requests==2.31.0
+
+# For loading credentials from a .env file
+python-dotenv==1.0.1
+
+# For generating Time-based One-Time Passwords (TOTP)
+pyotp==2.9.0
+
+# For decoding JSON Web Tokens during authentication
+PyJWT==2.8.0
+
+# For the themed Tkinter GUI
+ttkthemes==3.2.2
+
+# For the calendar date picker widget in the GUI
+tkcalendar==1.6.1
+
+
+trading_bot/
+├── trading_core/
+│   ├── strategies/
+│   │   ├── __init__.py
+│   │   ├── base_strategy.py
+│   │   ├── breakout.py
+│   │   └── sma_crossover.py
+│   ├── __init__.py
+│   ├── auth.py             # Moved from gpt_token.py
+│   ├── data_handler.py     # New: For handling live and historical data
+│   ├── engine.py           # New: The main trading engine
+│   └── execution.py        # Moved from orders.py
+│
+├── gui_app/
+│   ├── __init__.py
+│   ├── main.py             # The refactored gui.py
+│   └── views/              # Optional: For complex UI components
+│
+├── web_app/                # Placeholder for your future web application
+│   └── ...
+│
+├── config/
+│   ├── __init__.py
+│   └── settings.py         # For API keys, configurations
+│
+├── main.py                 # Main entry point to launch the application
+└── requirements.txt
