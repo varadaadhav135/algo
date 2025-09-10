@@ -11,13 +11,15 @@ from trading_core.engine import TradingEngine
 
 
 class SymbolSearchWindow(tk.Toplevel):
-    def __init__(self, parent, callback, search_query=""):
+    def __init__(self, parent, callback, segment, search_query=""):
         super().__init__(parent.root)
         self.parent = parent
         self.callback = callback
-        self.title("Search Symbols")
+        self.segment = segment
+        self.title(f"Search Symbols - {self.segment}")
         self.geometry("600x400")
-        self.df = self.parent.equity_df
+        self.current_df = pd.DataFrame()
+        self.df = self.parent.symbols_df
         search_frame = ttk.Frame(self, padding="10")
         search_frame.pack(fill=tk.X)
         ttk.Label(search_frame, text="Search:").pack(side=tk.LEFT, padx=(0, 5))
@@ -37,26 +39,32 @@ class SymbolSearchWindow(tk.Toplevel):
         if self.df is not None:
             self.on_search()
         else:
-            self.results_listbox.insert(tk.END, "CSV file not loaded.")
+            self.results_listbox.insert(tk.END, "Symbol data not loaded.")
 
     def populate_listbox(self, df):
+        self.current_df = df.reset_index(drop=True)
         self.results_listbox.delete(0, tk.END)
-        for _, row in df.iterrows():
-            self.results_listbox.insert(tk.END, f"{row['SYMBOL']} | {row['NAME OF COMPANY']}")
+        for _, row in self.current_df.iterrows():
+            self.results_listbox.insert(tk.END, f"{row['symbol']} | {row['NAME OF COMPANY']}")
 
     def on_search(self, event=None):
         query = self.search_entry.get().strip().lower()
         if self.df is None: return
+
+        segment_df = self.df[self.df['SEGMENT_UI'] == self.segment]
+
         if not query:
-            return self.populate_listbox(self.df)
-        mask = self.df['SYMBOL'].str.lower().str.contains(query) | self.df['NAME OF COMPANY'].str.lower().str.contains(
-            query)
-        self.populate_listbox(self.df[mask])
+            self.populate_listbox(segment_df)
+            return
+
+        mask = segment_df['symbol'].str.lower().str.contains(query) | segment_df[
+            'NAME OF COMPANY'].str.lower().str.contains(query)
+        self.populate_listbox(segment_df[mask])
 
     def add_selected(self):
         selected_indices = self.results_listbox.curselection()
         if not selected_indices: return
-        selected_symbols = [self.results_listbox.get(i).split('|')[0].strip() for i in selected_indices]
+        selected_symbols = [self.current_df.loc[i, 'SYMBOL'] for i in selected_indices]
         self.callback(selected_symbols)
         self.destroy()
 
@@ -126,7 +134,9 @@ class TradingApp:
             live_log_queue=self.live_log_queue,
             backtest_log_queue=self.backtest_log_queue
         )
-        self.equity_df = self._load_equity_data()
+        self.symbols_df = self._load_fyers_symbols()
+        if self.symbols_df is None:
+            self.symbols_df = self._load_local_symbols()
         self._create_widgets()
         self._create_menu()
         self.root.after(100, self._process_live_log_queue)
@@ -158,27 +168,33 @@ class TradingApp:
         input_frame.pack(fill=tk.X, pady=5)
         input_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(input_frame, text="Symbol:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        ttk.Label(input_frame, text="Segment:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.live_segment_combobox = ttk.Combobox(input_frame, values=["Equity", "Futures", "Options"], state="readonly",
+                                                  width=35)
+        self.live_segment_combobox.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        self.live_segment_combobox.current(0)
+
+        ttk.Label(input_frame, text="Symbol:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
         self.select_symbols_button = ttk.Button(input_frame, text="Select Symbols...",
                                                 command=self.open_live_search_window)
-        self.select_symbols_button.grid(row=0, column=1, sticky="w", padx=5, pady=5)
+        self.select_symbols_button.grid(row=1, column=1, sticky="w", padx=5, pady=5)
 
-        ttk.Label(input_frame, text="Strategy:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        ttk.Label(input_frame, text="Strategy:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
         strategy_names = list(self.engine.strategies_map.keys())
         self.live_strategy_combobox = ttk.Combobox(input_frame, values=strategy_names, state="readonly", width=35)
-        self.live_strategy_combobox.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+        self.live_strategy_combobox.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
         if strategy_names:
             self.live_strategy_combobox.current(0)
 
-        ttk.Label(input_frame, text="Trade Type:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        ttk.Label(input_frame, text="Trade Type:").grid(row=3, column=0, sticky="w", padx=5, pady=5)
         self.live_trade_type_combobox = ttk.Combobox(input_frame, values=["Intraday", "Positional"], state="readonly",
                                                      width=35)
-        self.live_trade_type_combobox.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
+        self.live_trade_type_combobox.grid(row=3, column=1, padx=5, pady=5, sticky="ew")
         self.live_trade_type_combobox.current(0)
 
-        ttk.Label(input_frame, text="Sizing:").grid(row=3, column=0, sticky="w", padx=5, pady=5)
+        ttk.Label(input_frame, text="Sizing:").grid(row=4, column=0, sticky="w", padx=5, pady=5)
         sizing_frame = ttk.Frame(input_frame)
-        sizing_frame.grid(row=3, column=1, sticky="ew", padx=5, pady=5)
+        sizing_frame.grid(row=4, column=1, sticky="ew", padx=5, pady=5)
         self.live_sizing_type_combobox = ttk.Combobox(sizing_frame, values=["Quantity", "Amount"], state="readonly",
                                                       width=10)
         self.live_sizing_type_combobox.pack(side="left")
@@ -222,9 +238,15 @@ class TradingApp:
         input_frame.pack(fill=tk.X, pady=5)
         input_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(input_frame, text="Symbol:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        ttk.Label(input_frame, text="Segment:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.backtest_segment_combobox = ttk.Combobox(input_frame, values=["Equity", "Futures", "Options"],
+                                                      state="readonly")
+        self.backtest_segment_combobox.grid(row=0, column=1, sticky="ew", columnspan=2, padx=5, pady=5)
+        self.backtest_segment_combobox.current(0)
+
+        ttk.Label(input_frame, text="Symbol:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
         symbol_frame = ttk.Frame(input_frame)
-        symbol_frame.grid(row=0, column=1, sticky="ew", columnspan=2, padx=5, pady=5)
+        symbol_frame.grid(row=1, column=1, sticky="ew", columnspan=2, padx=5, pady=5)
         self.select_backtest_symbol_button = ttk.Button(symbol_frame, text="Select Symbol...",
                                                         command=self.open_backtest_search_window)
         self.select_backtest_symbol_button.pack(side="left")
@@ -232,22 +254,22 @@ class TradingApp:
                                                relief="sunken", padding=(5, 2))
         self.selected_symbol_label.pack(side="left", padx=10, fill="x", expand=True)
 
-        ttk.Label(input_frame, text="Strategy:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        ttk.Label(input_frame, text="Strategy:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
         strategy_names = list(self.engine.strategies_map.keys())
         self.backtest_strategy_combobox = ttk.Combobox(input_frame, values=strategy_names, state="readonly")
-        self.backtest_strategy_combobox.grid(row=1, column=1, sticky="ew", columnspan=2, padx=5, pady=5)
+        self.backtest_strategy_combobox.grid(row=2, column=1, sticky="ew", columnspan=2, padx=5, pady=5)
         if strategy_names:
             self.backtest_strategy_combobox.current(0)
 
-        ttk.Label(input_frame, text="Trade Type:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        ttk.Label(input_frame, text="Trade Type:").grid(row=3, column=0, sticky="w", padx=5, pady=5)
         self.backtest_trade_type_combobox = ttk.Combobox(input_frame, values=["Intraday", "Positional"],
                                                          state="readonly")
-        self.backtest_trade_type_combobox.grid(row=2, column=1, sticky="ew", columnspan=2, padx=5, pady=5)
+        self.backtest_trade_type_combobox.grid(row=3, column=1, sticky="ew", columnspan=2, padx=5, pady=5)
         self.backtest_trade_type_combobox.current(0)
 
-        ttk.Label(input_frame, text="Sizing:").grid(row=3, column=0, sticky="w", padx=5, pady=5)
+        ttk.Label(input_frame, text="Sizing:").grid(row=4, column=0, sticky="w", padx=5, pady=5)
         sizing_frame = ttk.Frame(input_frame)
-        sizing_frame.grid(row=3, column=1, sticky="ew", padx=5, pady=5, columnspan=2)
+        sizing_frame.grid(row=4, column=1, sticky="ew", padx=5, pady=5, columnspan=2)
         self.backtest_sizing_type_combobox = ttk.Combobox(sizing_frame, values=["Quantity", "Amount"], state="readonly",
                                                           width=10)
         self.backtest_sizing_type_combobox.pack(side="left")
@@ -256,18 +278,18 @@ class TradingApp:
         self.backtest_sizing_value_entry.pack(side="left", padx=5, fill="x", expand=True)
         self.backtest_sizing_value_entry.insert(0, "1")
 
-        ttk.Label(input_frame, text="From Date:").grid(row=4, column=0, sticky="w", padx=5, pady=5)
+        ttk.Label(input_frame, text="From Date:").grid(row=5, column=0, sticky="w", padx=5, pady=5)
         self.start_date_entry = DateEntry(input_frame, date_pattern='yyyy-mm-dd', width=12)
-        self.start_date_entry.grid(row=4, column=1, sticky="ew", columnspan=2, padx=5, pady=5)
+        self.start_date_entry.grid(row=5, column=1, sticky="ew", columnspan=2, padx=5, pady=5)
         self.start_date_entry.bind("<Button-1>", lambda e: self.start_date_entry.drop_down())
 
-        ttk.Label(input_frame, text="To Date:").grid(row=5, column=0, sticky="w", padx=5, pady=5)
+        ttk.Label(input_frame, text="To Date:").grid(row=6, column=0, sticky="w", padx=5, pady=5)
         self.end_date_entry = DateEntry(input_frame, date_pattern='yyyy-mm-dd', width=12)
-        self.end_date_entry.grid(row=5, column=1, sticky="ew", columnspan=2, padx=5, pady=5)
+        self.end_date_entry.grid(row=6, column=1, sticky="ew", columnspan=2, padx=5, pady=5)
         self.end_date_entry.bind("<Button-1>", lambda e: self.end_date_entry.drop_down())
 
         button_frame = ttk.Frame(input_frame)
-        button_frame.grid(row=6, column=0, columnspan=3, pady=10)
+        button_frame.grid(row=7, column=0, columnspan=3, pady=10)
         self.run_backtest_button = ttk.Button(button_frame, text="Run Backtest", command=self.start_backtest)
         self.run_backtest_button.pack()
 
@@ -280,12 +302,14 @@ class TradingApp:
         SettingsWindow(self)
 
     def open_live_search_window(self):
-        if self.equity_df is None: return messagebox.showerror("Error", "Symbol data file is missing.")
-        SymbolSearchWindow(self, callback=self.add_symbols_to_tracker_tree)
+        if self.symbols_df is None: return messagebox.showerror("Error", "Symbol data file is missing.")
+        segment = self.live_segment_combobox.get()
+        SymbolSearchWindow(self, callback=self.add_symbols_to_tracker_tree, segment=segment)
 
     def open_backtest_search_window(self):
-        if self.equity_df is None: return messagebox.showerror("Error", "Symbol data file is missing.")
-        SymbolSearchWindow(self, callback=self.set_backtest_symbol)
+        if self.symbols_df is None: return messagebox.showerror("Error", "Symbol data file is missing.")
+        segment = self.backtest_segment_combobox.get()
+        SymbolSearchWindow(self, callback=self.set_backtest_symbol, segment=segment)
 
     def add_symbols_to_tracker_tree(self, symbols):
         strategy_name = self.live_strategy_combobox.get()
@@ -304,14 +328,71 @@ class TradingApp:
         if symbols:
             self.selected_backtest_symbol_var.set(symbols[0])
 
-    def _load_equity_data(self, filename='EQUITY_L_modified.csv'):
+    def _load_fyers_symbols(self):
+        urls = {
+            'CM': 'https://public.fyers.in/sym_details/NSE_CM.csv',
+            'FO': 'https://public.fyers.in/sym_details/NSE_FO.csv',
+        }
+        all_dfs = []
+        try:
+            self.live_log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] [GUI] Fetching latest symbols from Fyers...\n")
+
+            # Equity - CM segment
+            # Column 2=company_name, Column 10=exchange_symbol, Column 14=symbol
+            eq_df = pd.read_csv(urls['CM'], header=None, usecols=[1, 9, 13], low_memory=False)
+            eq_df.columns = ['NAME OF COMPANY', 'SYMBOL', 'symbol']
+            eq_df.dropna(subset=['SYMBOL', 'NAME OF COMPANY', 'symbol'], inplace=True)
+            eq_df = eq_df[~eq_df['NAME OF COMPANY'].astype(str).str.strip().isin(['', 'XX'])]
+            eq_df['SEGMENT_UI'] = 'Equity'
+            all_dfs.append(eq_df)
+
+            # F&O
+            # Assuming similar 21-column structure as CM
+            # Column 2=company_name, Column 3=Instrument, Column 10=exchange_symbol, Column 14=symbol
+            fo_df = pd.read_csv(urls['FO'], header=None, usecols=[1, 2, 9, 13], low_memory=False)
+            fo_df.columns = ['NAME OF COMPANY', 'Instrument', 'SYMBOL', 'symbol']
+            fo_df.dropna(subset=['SYMBOL', 'NAME OF COMPANY', 'Instrument', 'symbol'], inplace=True)
+            fo_df = fo_df[~fo_df['NAME OF COMPANY'].astype(str).str.strip().isin(['', 'XX'])].copy()
+
+            # The 'Instrument' column now contains integer codes instead of strings.
+            # FUTIDX: 11, FUTSTK: 12, OPTIDX: 13, OPTSTK: 14
+            fo_df['Instrument'] = pd.to_numeric(fo_df['Instrument'], errors='coerce')
+            fo_df.dropna(subset=['Instrument'], inplace=True)
+            fo_df['Instrument'] = fo_df['Instrument'].astype(int)
+
+            futures_df = fo_df[fo_df['Instrument'].isin([11, 12])].copy()
+            futures_df['SEGMENT_UI'] = 'Futures'
+            all_dfs.append(futures_df[['SYMBOL', 'NAME OF COMPANY', 'SEGMENT_UI', 'symbol']])
+
+            options_df = fo_df[fo_df['Instrument'].isin([13, 14])].copy()
+            options_df['SEGMENT_UI'] = 'Options'
+            all_dfs.append(options_df[['SYMBOL', 'NAME OF COMPANY', 'SEGMENT_UI', 'symbol']])
+
+            combined_df = pd.concat(all_dfs, ignore_index=True)
+
+            # Ensure columns are string type to prevent .str accessor errors
+            combined_df['SYMBOL'] = combined_df['SYMBOL'].astype(str)
+            combined_df['NAME OF COMPANY'] = combined_df['NAME OF COMPANY'].astype(str)
+            combined_df['symbol'] = combined_df['symbol'].astype(str)
+
+
+            self.live_log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] [GUI] Fyers symbol data loaded successfully.\n")
+            return combined_df
+        except Exception as e:
+            self.live_log_queue.put(
+                f"[{datetime.now().strftime('%H:%M:%S')}] [GUI] Failed to load symbols from Fyers: {e}. Falling back to local file.\n")
+            return None
+
+    def _load_local_symbols(self, filename='EQUITY_L_modified.csv'):
         try:
             df = pd.read_csv(filename, skipinitialspace=True)
             df.columns = df.columns.str.strip()
-            df['SYMBOL'] = df['SYMBOL'].astype(str)
+            # Ensure the SYMBOL column from local file has the correct prefix
+            df['SYMBOL'] = df.apply(lambda row: row['SYMBOL'] if row['SYMBOL'].startswith('NSE:') else f"NSE:{row['SYMBOL']}", axis=1)
             df['NAME OF COMPANY'] = df['NAME OF COMPANY'].astype(str)
+            df['SEGMENT_UI'] = 'Equity'
             self.live_log_queue.put(
-                f"[{datetime.now().strftime('%H:%M:%S')}] [GUI] Equity symbol data loaded successfully.\n")
+                f"[{datetime.now().strftime('%H:%M:%S')}] [GUI] Loaded local equity symbols from {filename}.\n")
             return df
         except FileNotFoundError:
             messagebox.showerror("Error", f"Could not find '{filename}'. Symbol search will be disabled.")

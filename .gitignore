@@ -34,3 +34,4 @@ env
 tokens.json
 *.pyc
 *.log
+data
