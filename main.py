@@ -13,6 +13,10 @@ if __name__ == "__main__":
     # ... etc.
     load_dotenv()
 
+    # Create logs directory if it doesn't exist
+    if not os.path.exists("fyers_logs"):
+        os.makedirs("fyers_logs")
+
     # Initialize and run the GUI application
     root = ThemedTk(theme="vista")
     app = TradingApp(root)

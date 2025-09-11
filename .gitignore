@@ -8,6 +8,7 @@ yarn.lock
 .webpack/
 coverage/
 output/
+logs/
 out
 tests/log
 log/
@@ -35,3 +36,4 @@ tokens.json
 *.pyc
 *.log
 data
+fyers_logs

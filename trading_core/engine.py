@@ -45,7 +45,7 @@ class TradingEngine:
                 self._log("Authentication failed.")
                 return False
             self.fyers_model = fyersModel.FyersModel(
-                client_id=os.getenv('APP_ID'), token=access_token, is_async=False
+                client_id=os.getenv('APP_ID'), token=access_token, is_async=False, log_path="fyers_logs"
             )
             self.order_manager = OrderManager(self.fyers_model, log_callback=self._log)
             self._log("Authentication successful.")
