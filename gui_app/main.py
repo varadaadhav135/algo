@@ -141,6 +141,7 @@ class TradingApp:
         self._create_menu()
         self.root.after(100, self._process_live_log_queue)
         self.root.after(100, self._process_backtest_log_queue)
+        self.fetch_and_display_funds()
 
     def _create_menu(self):
         menu_bar = tk.Menu(self.root)
@@ -164,6 +165,15 @@ class TradingApp:
     def _create_live_trade_widgets(self):
         main_frame = ttk.Frame(self.live_trade_tab, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
+
+        account_info_frame = ttk.LabelFrame(main_frame, text="Account Information", padding="10")
+        account_info_frame.pack(fill=tk.X, pady=5)
+        self.funds_var = tk.StringVar(value="Available Funds: Fetching...")
+        funds_label = ttk.Label(account_info_frame, textvariable=self.funds_var)
+        funds_label.pack(side=tk.LEFT, padx=5)
+        refresh_button = ttk.Button(account_info_frame, text="Refresh", command=self.fetch_and_display_funds)
+        refresh_button.pack(side=tk.RIGHT, padx=5)
+
         input_frame = ttk.LabelFrame(main_frame, text="Configure Stock Tracker", padding="10")
         input_frame.pack(fill=tk.X, pady=5)
         input_frame.columnconfigure(1, weight=1)
@@ -225,6 +235,9 @@ class TradingApp:
         self.start_button.pack(side=tk.LEFT, padx=5)
         self.stop_button = ttk.Button(control_frame, text="Stop Trading", command=self.stop_trading, state="disabled")
         self.stop_button.pack(side=tk.LEFT, padx=5)
+
+        self.remove_button = ttk.Button(control_frame, text="Remove Selected", command=self.remove_selected_tracker)
+        self.remove_button.pack(side=tk.RIGHT, padx=5)
 
         log_frame = ttk.LabelFrame(main_frame, text="Live Logs", padding="10")
         log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
@@ -417,6 +430,7 @@ class TradingApp:
         self.live_log_queue.put("GUI: Sending command to start live session...\n")
         self.start_button.config(state="disabled")
         self.stop_button.config(state="normal")
+        self.remove_button.config(state="disabled")
         threading.Thread(
             target=self.engine.start_live_session,
             args=(active_trackers,),
@@ -428,6 +442,31 @@ class TradingApp:
         self.engine.stop_session()
         self.start_button.config(state="normal")
         self.stop_button.config(state="disabled")
+        self.remove_button.config(state="normal")
+
+    def remove_selected_tracker(self):
+        selected_items = self.tree.selection()
+        if not selected_items:
+            messagebox.showwarning("No Selection", "Please select a tracker to remove.", parent=self.root)
+            return
+        for item in selected_items:
+            self.tree.delete(item)
+
+    def fetch_and_display_funds(self):
+        self.funds_var.set("Available Funds: Fetching...")
+        threading.Thread(target=self._fetch_funds_thread, daemon=True).start()
+
+    def _fetch_funds_thread(self):        
+        """Worker thread to fetch funds and update the GUI."""
+        funds_result = self.engine.get_account_funds()
+        if funds_result.get("status") == "success":
+            display_text = f"Available Funds: {funds_result['data']}"
+            self.root.after(0, lambda: self.funds_var.set(display_text))
+        else:
+            error_message = funds_result.get('error', 'Unknown Error')
+            display_text = f"Available Funds: Error"
+            self.root.after(0, lambda: self.funds_var.set(display_text))
+            self.live_log_queue.put(f"GUI: Error fetching funds: {error_message}\n")
 
     def start_backtest(self):
         symbol = self.selected_backtest_symbol_var.get()
@@ -458,12 +497,7 @@ class TradingApp:
         ).start()
 
     def _run_backtest_thread(self, symbol, strategy_name, start_date, end_date, trade_type, sizing_type, sizing_value):
-        is_authenticated = self.engine._authenticate()
-        if not is_authenticated:
-            self.backtest_log_queue.put("Authentication failed. Cannot run backtest.\n")
-            self.root.after(0, lambda: self.run_backtest_button.config(state="normal"))
-            return
-
+        # Authentication is now handled within the engine's run_backtest method.
         mock_om = BacktestOrderManager(lambda msg: self.backtest_log_queue.put(msg + "\n"))
         original_om = self.engine.order_manager
         self.engine.order_manager = mock_om

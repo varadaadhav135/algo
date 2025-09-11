@@ -11,52 +11,75 @@ from .auth import FyersAuthClient
 from .execution import OrderManager
 from .data_handler import LiveDataHandler, BacktestDataHandler
 from trading_core.strategies.base_strategy import Strategy
+from fyers_api.client import FyersApiClient
 
 
 class TradingEngine:
     def __init__(self, live_log_queue=None, backtest_log_queue=None):
         self.live_log_queue = live_log_queue
         self.backtest_log_queue = backtest_log_queue
-        self.fyers_model = None
+        self.fyers = None
+        self.api_client = None
         self.order_manager = None
         self.live_data_handler = None
         self.fyers_socket = None
+
+        # Authentication attributes
+        self.client_id = os.getenv('APP_ID')
+        self.access_token = None
 
         self._active_log_queue = self.live_log_queue
         self.strategies_map = self._load_strategies()
 
     def _log(self, message):
         if self._active_log_queue:
-            log_entry = f"[{datetime.now().strftime('%H:%M:%S')}] [Engine] {message}"
-            self._active_log_queue.put(log_entry + "\n")
+            self._active_log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] [Engine] {message}\n")
 
     def _authenticate(self):
-        if self.fyers_model: return True
+        """Handles only the token generation part of authentication."""
+        if self.access_token: return True
         try:
             self._log("Authenticating...")
             auth_client = FyersAuthClient(
-                fy_id=os.getenv('FY_ID'), app_id=os.getenv('APP_ID'),
+                fy_id=os.getenv('FY_ID'), app_id=self.client_id,
                 app_type="100", app_secret=os.getenv('APP_SECRET'),
                 totp_key=os.getenv('TOTP_KEY'), pin=os.getenv('PIN'),
                 redirect_uri=os.getenv('REDIRECT_URL')
             )
-            access_token = auth_client.get_access_token()
-            if not access_token:
+            self.access_token = auth_client.get_access_token()
+            if not self.access_token:
                 self._log("Authentication failed.")
                 return False
-            self.fyers_model = fyersModel.FyersModel(
-                client_id=os.getenv('APP_ID'), token=access_token, is_async=False, log_path="fyers_logs"
-            )
-            self.order_manager = OrderManager(self.fyers_model, log_callback=self._log)
             self._log("Authentication successful.")
             return True
         except Exception as e:
             self._log(f"Authentication error: {e}")
             return False
 
+    def authenticate_and_initialize(self):
+        """Authenticates and ensures the FyersModel instance is created."""
+        if self.fyers:
+            return True
+
+        if self._authenticate():
+            self.fyers = fyersModel.FyersModel(
+                client_id=self.client_id, token=self.access_token, log_path="logs"
+            )
+            self.api_client = FyersApiClient(self.fyers)
+            self.order_manager = OrderManager(self.fyers, log_callback=self._log)
+            return True
+        return False
+
+    def get_account_funds(self):
+        """Fetches account funds using the API client."""
+        if not self.api_client:
+            if not self.authenticate_and_initialize():
+                return {"status": "error", "error": "Authentication Failed"}
+        return self.api_client.get_funds()
+
     def start_live_session(self, trackers: list):
         self._active_log_queue = self.live_log_queue
-        if not self._authenticate():
+        if not self.authenticate_and_initialize():
             return
         self._log(f"Starting live session for {len(trackers)} tracker(s).")
 
@@ -87,7 +110,7 @@ class TradingEngine:
         self._start_websocket()
 
     def _start_websocket(self):
-        token = self.fyers_model.token
+        token = self.fyers.token
         self.fyers_socket = data_ws.FyersDataSocket(
             access_token=token, on_message=self.live_data_handler.on_message,
             on_error=lambda e: self._log(f"WebSocket Error: {e}"),
@@ -117,8 +140,12 @@ class TradingEngine:
             self._log(f"Backtest failed: Strategy '{strategy_name}' not found.")
             return
 
+        if not self.authenticate_and_initialize():
+            self.backtest_log_queue.put("Authentication failed. Cannot run backtest.")
+            return
+
         self._log(f"Starting '{trade_type}' backtest for {symbol} with {strategy_name}...")
-        backtest_handler = BacktestDataHandler(self.fyers_model, self.backtest_log_queue)
+        backtest_handler = BacktestDataHandler(self.fyers, self.backtest_log_queue)
         historical_data = backtest_handler.fetch_data(symbol, start_date, end_date)
 
         if historical_data.empty:
