@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
+from trading_core.strategies.base_strategy import Strategy
 
 class FifteenMinBreakdownStrategy(Strategy):
     """Enter short if 2nd 15-min candle breaks low of 1st 15-min candle given <1% move."""
@@ -16,10 +17,26 @@ class FifteenMinBreakdownStrategy(Strategy):
         self._first_candle_low = None
         self._first_candle_close = None
         self._second_candle_start = None
-        self._entered = False
         self._entry_price = None
-    
-    def on_tick(self, timestamp: datetime, price: float):
+
+    def _restore_state_from_position(self, position: dict):
+        self.entry_price = position.get('entry_price')
+        # Note: candle state is not restored, so this strategy might not
+        # correctly manage a trade after a restart if it depends on candle state.
+
+    def on_tick(self, timestamp: datetime, data: dict):
+        price = data.get('ltp', data.get('close'))
+
+        if not price:
+            return
+
+        position_details = self.order_manager.get_open_position(self.symbol)
+        is_my_trade = position_details and position_details.get('strategy') == self.STRATEGY_NAME
+        current_qty = position_details.get('quantity', 0) if position_details else 0
+
+        if position_details and not is_my_trade:
+            return
+
         # Initialize first candle
         if self._first_candle_start is None:
             # Round down to nearest 15-minute block
@@ -54,7 +71,7 @@ class FifteenMinBreakdownStrategy(Strategy):
         
         # Update second 15-min candle until it completes or entry triggers
         second_end = self._second_candle_start + timedelta(minutes=15)
-        if timestamp < second_end and not self._entered:
+        if timestamp < second_end and current_qty == 0:
             self._second_candle_high = max(self._second_candle_high, price)
             self._second_candle_low = min(self._second_candle_low, price)
             self._second_candle_close = price
@@ -62,19 +79,25 @@ class FifteenMinBreakdownStrategy(Strategy):
             if price < self._first_candle_low:
                 qty = self._calculate_quantity(price)
                 if qty > 0:
-                    self.order_manager.sell(self.symbol, qty, price, self.product_type)
-                    self._entered = True
+                    self.order_manager.place_order(
+                        symbol=self.symbol, qty=qty, side=-1, order_type=2, timestamp=timestamp,
+                        product_type=self.product_type, strategy_name=self.STRATEGY_NAME, price=price
+                    )
                     self._entry_price = price
             return
         
         # Manage exit if entered
-        if self._entered:
+        if current_qty < 0 and self._entry_price:
             target = self._entry_price * 0.98  # 2% below selling price
             stop_loss = self._entry_price * 1.01  # 1% above selling price
             if price <= target or price >= stop_loss:
-                qty = self._calculate_quantity(price)
+                qty_to_exit = abs(current_qty)
                 # Exit entire position (buy to cover short)
-                self.order_manager.buy(self.symbol, qty, price, self.product_type)
+                self.order_manager.place_order(
+                    symbol=self.symbol, qty=qty_to_exit, side=1, order_type=2, timestamp=timestamp,
+                    product_type=self.product_type, strategy_name=self.STRATEGY_NAME,
+                    entry_price=self._entry_price, exit_reason="SL/TP Hit", price=price
+                )
                 # Reset for next setup
                 self._reset_candles(timestamp)
             return
@@ -90,9 +113,7 @@ class FifteenMinBreakdownStrategy(Strategy):
         self._first_candle_low = None
         self._first_candle_close = None
         self._second_candle_start = None
-        self._entered = False
         self._entry_price = None
         # Re-process this tick as start of new first candle
         if hasattr(self, '_second_candle_close') and self._second_candle_close:
-            self.on_tick(timestamp, self._second_candle_close)
-
+            self.on_tick(timestamp, {'close': self._second_candle_close})

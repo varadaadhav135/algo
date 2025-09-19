@@ -1,23 +1,26 @@
-# trading_bot/main.py
 import os
+import sys
 from dotenv import load_dotenv
 from ttkthemes import ThemedTk
+
+# Add project root to the Python path to ensure modules are discoverable
+project_root = os.path.dirname(os.path.abspath(__file__))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 from gui_app.main import TradingApp
 
-if __name__ == "__main__":
-    # Load environment variables from a .env file
-    # Create a file named '.env' in the trading_bot directory
-    # and add your credentials there, e.g.,
-    # FY_ID="your_fyers_id"
-    # APP_ID="your_app_id"
-    # ... etc.
+def main():
+    """
+    Main function to initialize and run the trading application.
+    """
+    # Load environment variables from .env file
     load_dotenv()
 
-    # Create logs directory if it doesn't exist
-    if not os.path.exists("fyers_logs"):
-        os.makedirs("fyers_logs")
-
     # Initialize and run the GUI application
-    root = ThemedTk(theme="vista")
+    root = ThemedTk(theme="black")
     app = TradingApp(root)
     root.mainloop()
+
+if __name__ == "__main__":
+    main()

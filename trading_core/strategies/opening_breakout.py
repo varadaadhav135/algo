@@ -19,34 +19,49 @@ class OpeningBreakoutStrategy(Strategy):
         self.candle_close_time = time(9, 30)
         self.market_close_time = time(15, 15)
         self.fifteen_min_close_price = None
-        self.position = None
         self.entry_price = None
         self.trade_taken_today = False
         self._current_day = None
 
-    def on_tick(self, timestamp: datetime, price: float):
+    def _restore_state_from_position(self, position: dict):
+        self.entry_price = position.get('entry_price')
+        self.trade_taken_today = True  # Assume trade was taken if we are restoring
+
+    def on_tick(self, timestamp: datetime, data: dict):
+        price = data.get('ltp', data.get('close'))
+
+        if not price:
+            return
+
+        position_details = self.order_manager.get_open_position(self.symbol)
+        is_my_trade = position_details and position_details.get('strategy') == self.STRATEGY_NAME
+        current_qty = position_details.get('quantity', 0) if position_details else 0
+
+        if position_details and not is_my_trade:
+            return  # Not our trade to manage
+
         if self._current_day is None or timestamp.date() > self._current_day:
             self._reset_day()
             self._current_day = timestamp.date()
 
-        if self.position:
-            self._manage_open_position(price, timestamp)
+        if current_qty != 0:
+            self._manage_open_position(price, timestamp, current_qty)
             return
 
         if self.fifteen_min_close_price is None and timestamp.time() >= self.candle_close_time:
             self.fifteen_min_close_price = price
 
-        if not self.position and not self.trade_taken_today and self.fifteen_min_close_price is not None:
+        if current_qty == 0 and not self.trade_taken_today and self.fifteen_min_close_price is not None:
             self._look_for_entry_signal(price, timestamp)
 
-    def _manage_open_position(self, price: float, timestamp: datetime):
+    def _manage_open_position(self, price: float, timestamp: datetime, current_qty: int):
         should_exit, reason = False, None
-        if self.position == 'long':
+        if current_qty > 0:  # Long position
             if price >= self.entry_price * (1 + self.target_percent / 100):
                 should_exit, reason = True, "Target Profit Hit"
             elif price <= self.entry_price * (1 - self.stoploss_percent / 100):
                 should_exit, reason = True, "Stop Loss Hit"
-        elif self.position == 'short':
+        elif current_qty < 0:  # Short position
             if price <= self.entry_price * (1 - self.target_percent / 100):
                 should_exit, reason = True, "Target Profit Hit"
             elif price >= self.entry_price * (1 + self.stoploss_percent / 100):
@@ -56,16 +71,13 @@ class OpeningBreakoutStrategy(Strategy):
             should_exit, reason = True, "Intraday Auto Square-Off"
 
         if should_exit:
-            qty_to_trade = self._calculate_quantity(price)
-            if qty_to_trade <= 0: return
-
-            side_to_exit = -1 if self.position == 'long' else 1
+            qty_to_exit = abs(current_qty)
+            side_to_exit = -1 if current_qty > 0 else 1
             self.order_manager.place_order(
-                symbol=self.symbol, qty=qty_to_trade, side=side_to_exit, order_type=2, timestamp=timestamp,
+                symbol=self.symbol, qty=qty_to_exit, side=side_to_exit, order_type=2, timestamp=timestamp,
                 product_type=self.product_type, strategy_name=self.STRATEGY_NAME,
                 entry_price=self.entry_price, exit_reason=reason, price=price
             )
-            self.position = None
             self.trade_taken_today = True
 
     def _look_for_entry_signal(self, price: float, timestamp: datetime):
@@ -81,7 +93,6 @@ class OpeningBreakoutStrategy(Strategy):
                 product_type=self.product_type, strategy_name=self.STRATEGY_NAME,
                 entry_price=price, price=price
             )
-            self.position = 'long'
             self.entry_price = price
         elif price < breakout_low:
             self.order_manager.place_order(
@@ -89,7 +100,6 @@ class OpeningBreakoutStrategy(Strategy):
                 product_type=self.product_type, strategy_name=self.STRATEGY_NAME,
                 entry_price=price, price=price
             )
-            self.position = 'short'
             self.entry_price = price
 
     def _reset_day(self):

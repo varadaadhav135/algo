@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
+from trading_core.strategies.base_strategy import Strategy
 
 class DailyBreakdownStrategy(Strategy):
     """Enter short if price breaks low of first qualifying 15-min candle (<1% move OR red candle >1%)."""
@@ -26,11 +27,27 @@ class DailyBreakdownStrategy(Strategy):
         self._current_candle_open = None
         
         # Trade management
-        self._entered = False
         self._entry_price = None
         self._entry_date = None
-    
-    def on_tick(self, timestamp: datetime, price: float):
+
+    def _restore_state_from_position(self, position: dict):
+        self.entry_price = position.get('entry_price')
+        # Note: _entry_date is not persisted, will be None on restore.
+        # This seems acceptable for the current logic.
+
+    def on_tick(self, timestamp: datetime, data: dict):
+        price = data.get('ltp', data.get('close'))
+
+        if not price:
+            return
+
+        position_details = self.order_manager.get_open_position(self.symbol)
+        is_my_trade = position_details and position_details.get('strategy') == self.STRATEGY_NAME
+        current_qty = position_details.get('quantity', 0) if position_details else 0
+
+        if position_details and not is_my_trade:
+            return
+
         current_date = timestamp.date()
         
         # Start new current candle if needed
@@ -60,7 +77,7 @@ class DailyBreakdownStrategy(Strategy):
         
         # Check for entry if we have a breakdown level and not entered
         if (self._breakdown_level is not None and 
-            not self._entered and 
+            current_qty == 0 and
             self._qualification_date is not None):
             
             # Only trade on same day as qualification
@@ -68,21 +85,26 @@ class DailyBreakdownStrategy(Strategy):
                 if price < self._breakdown_level:
                     qty = self._calculate_quantity(price)
                     if qty > 0:
-                        self.order_manager.sell(self.symbol, qty, price, self.product_type)
-                        self._entered = True
+                        self.order_manager.place_order(
+                            symbol=self.symbol, qty=qty, side=-1, order_type=2, timestamp=timestamp,
+                            product_type=self.product_type, strategy_name=self.STRATEGY_NAME, price=price
+                        )
                         self._entry_price = price
                         self._entry_date = current_date
         
         # Manage exit if entered
-        if self._entered:
+        if current_qty < 0 and self._entry_price:
             target = self._entry_price * 0.98  # 2% below selling price
             stop_loss = self._entry_price * 1.01  # 1% above selling price
             if price <= target or price >= stop_loss:
-                qty = self._calculate_quantity(self._entry_price)  # Use entry price for quantity calc
+                qty_to_exit = abs(current_qty)
                 # Exit short position (buy to cover)
-                self.order_manager.buy(self.symbol, qty, price, self.product_type)
+                self.order_manager.place_order(
+                    symbol=self.symbol, qty=qty_to_exit, side=1, order_type=2, timestamp=timestamp,
+                    product_type=self.product_type, strategy_name=self.STRATEGY_NAME,
+                    entry_price=self._entry_price, exit_reason="SL/TP Hit", price=price
+                )
                 # Reset trade state but keep breakdown level for rest of day
-                self._entered = False
                 self._entry_price = None
                 self._entry_date = None
         
@@ -134,4 +156,3 @@ class DailyBreakdownStrategy(Strategy):
         self._first_candle_close = None
         self._breakdown_level = None
         self._qualification_date = None
-

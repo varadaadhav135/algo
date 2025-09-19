@@ -1,5 +1,6 @@
 from datetime import datetime
 import math
+from trading_core.strategies.base_strategy import Strategy
 
 class HADojiBreakout52WStrategy(Strategy):
     """HA Doji breakout near 52W high with weekly RSI filter and SMA exit."""
@@ -44,21 +45,39 @@ class HADojiBreakout52WStrategy(Strategy):
         # Store weekly RSI values (simplified placeholder, in practice requires external data)
         self.weekly_rsi = None
 
-        self.in_position = False
         self.entry_price = None
         self.stop_loss_price = None
-        self.position_id = "HA_Doji_Long"
 
-    def on_tick(self, timestamp: datetime, price_data: dict):
+    def _restore_state_from_position(self, position: dict):
+        self.entry_price = position.get('entry_price')
+        if self.entry_price:
+            self.stop_loss_price = self.entry_price * (1 - self.sl_pct / 100.0)
+
+    def on_tick(self, timestamp: datetime, data: dict):
         """
-        price_data should contain keys:
-          'open', 'high', 'low', 'close'
+        data should contain keys for OHLC, e.g.:
+          'open', 'high', 'low', 'close' for backtesting from candles
+          'open_price', 'high_price', 'low_price', 'close_price' for live data
         """
-        # Extract OHLC from price_data
-        o = price_data['open']
-        h = price_data['high']
-        l = price_data['low']
-        c = price_data['close']
+        position_details = self.order_manager.get_open_position(self.symbol)
+        is_my_trade = position_details and position_details.get('strategy') == self.STRATEGY_NAME
+        current_qty = position_details.get('quantity', 0) if position_details else 0
+
+        if position_details and not is_my_trade:
+            return
+            
+        # Extract OHLC from data, supporting both live and backtest keys
+        o = data.get('open', data.get('open_price'))
+        h = data.get('high', data.get('high_price'))
+        l = data.get('low', data.get('low_price'))
+        c = data.get('close', data.get('close_price', data.get('ltp')))
+
+        if any(v is None for v in [o, h, l, c]):
+            # Not enough data to proceed
+            return
+
+        # Use 'c' (close or ltp) for quantity and position management
+        price = c
 
         # Compute HA close
         ha_close = (o + h + l + c) / 4.0
@@ -121,29 +140,32 @@ class HADojiBreakout52WStrategy(Strategy):
         if (self.last_doji_high is not None and
             breakout_price_condition and
             in_52w_range and
-            rsi_ok and
-            not self.in_position):
+            rsi_ok and current_qty == 0):
 
-            qty = self._calculate_quantity(price_data['close'])
+            qty = self._calculate_quantity(price)
             if qty > 0:
-                self.order_manager.buy(
-                    self.symbol, qty, price_data['close'], self.product_type)
-                self.in_position = True
-                self.entry_price = price_data['close']
+                self.order_manager.place_order(
+                    symbol=self.symbol, qty=qty, side=1, order_type=2, timestamp=timestamp,
+                    product_type=self.product_type, strategy_name=self.STRATEGY_NAME, price=price
+                )
+                self.entry_price = price
                 self.stop_loss_price = self.entry_price * (1 - self.sl_pct / 100.0)
 
         # Manage stop loss exit
-        if self.in_position:
-            if price_data['low'] <= self.stop_loss_price:
-                qty = self._calculate_quantity(self.entry_price)
-                self.order_manager.sell(self.symbol, qty, self.stop_loss_price, self.product_type)
+        if current_qty > 0:
+            if self.stop_loss_price and l <= self.stop_loss_price:
+                # On exit, we close the entire position.
+                qty_to_exit = abs(current_qty)
+                self.order_manager.place_order(
+                    symbol=self.symbol, qty=qty_to_exit, side=-1, order_type=2, timestamp=timestamp,
+                    product_type=self.product_type, strategy_name=self.STRATEGY_NAME,
+                    entry_price=self.entry_price, exit_reason="Stop Loss", price=self.stop_loss_price
+                )
                 self._reset_position()
 
         # Exit condition: daily close below daily 20 SMA (not implemented here, requires daily SMA data input)
         # Could be integrated with external daily SMA updates
 
     def _reset_position(self):
-        self.in_position = False
         self.entry_price = None
         self.stop_loss_price = None
-        self.position_id = "HA_Doji_Long"

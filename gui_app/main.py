@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, colorchooser
 import threading
 import queue
+import json
 from datetime import datetime
 import pandas as pd
 from ttkthemes import ThemedTk
@@ -75,7 +76,17 @@ class SymbolSearchWindow(tk.Toplevel):
 class BacktestOrderManager:
     def __init__(self, log_callback):
         self.log_callback = log_callback
+        self.positions = {}
         self.log_callback("Initialized Mock Order Manager for Backtesting.")
+
+    def get_position(self, symbol: str) -> int:
+        """Returns the current position quantity for a symbol."""
+        position = self.positions.get(symbol)
+        return position.get('quantity', 0) if position else 0
+
+    def get_open_position(self, symbol: str) -> dict | None:
+        """Returns the full position details for a symbol, if one exists."""
+        return self.positions.get(symbol)
 
     def place_order(self, symbol, qty, side, order_type, timestamp,
                     strategy_name=None, entry_price=None, exit_reason=None, price=None, **kwargs):
@@ -93,9 +104,50 @@ class BacktestOrderManager:
             log_message += f"  Reason:  {exit_reason}\n"
         elif exit_reason:
             log_message += f"  Reason:  {exit_reason}\n"
+
+        current_position_details = self.get_open_position(symbol)
+        current_qty = self.get_position(symbol)
+        new_qty = current_qty + (qty * side)
+
+        if new_qty == 0:
+            if symbol in self.positions:
+                del self.positions[symbol]
+        else:
+            if not current_position_details:
+                self.positions[symbol] = {
+                    'quantity': new_qty, 'strategy': strategy_name, 'entry_price': price,
+                }
+            else:
+                self.positions[symbol]['quantity'] = new_qty
+        log_message += f"\n  Position Change: {symbol} from {current_qty} to {new_qty}"
         log_message += "--------------------"
+
         self.log_callback(log_message)
 
+class DataLogWindow(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent.root)
+        self.parent = parent
+        self.title("Live Data Log")
+        self.geometry("700x500")
+
+        log_frame = ttk.LabelFrame(self, text="Live Data Stream", padding="10")
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=5, padx=5)
+        self.log_area = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD, state='disabled', height=10)
+        self.log_area.pack(fill=tk.BOTH, expand=True)
+
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.parent.data_log_window = self  # Register with parent
+
+    def update_log(self, message):
+        self.log_area.config(state='normal')
+        self.log_area.insert(tk.END, message)
+        self.log_area.config(state='disabled')
+        self.log_area.see(tk.END)
+
+    def on_close(self):
+        self.parent.data_log_window = None  # Unregister
+        self.destroy()
 
 class SettingsWindow(tk.Toplevel):
     def __init__(self, parent):
@@ -130,9 +182,12 @@ class TradingApp:
         self.selected_backtest_symbol_var = tk.StringVar(value="No symbol selected")
         self.live_log_queue = queue.Queue()
         self.backtest_log_queue = queue.Queue()
+        self.data_log_queue = queue.Queue()
+        self.data_log_window = None
         self.engine = TradingEngine(
             live_log_queue=self.live_log_queue,
-            backtest_log_queue=self.backtest_log_queue
+            backtest_log_queue=self.backtest_log_queue,
+            data_log_queue=self.data_log_queue
         )
         self.symbols_df = self._load_fyers_symbols()
         if self.symbols_df is None:
@@ -141,6 +196,7 @@ class TradingApp:
         self._create_menu()
         self.root.after(100, self._process_live_log_queue)
         self.root.after(100, self._process_backtest_log_queue)
+        self.root.after(100, self._process_data_log_queue)
         self.fetch_and_display_funds()
 
     def _create_menu(self):
@@ -151,16 +207,30 @@ class TradingApp:
         file_menu.add_command(label="Settings", command=self.open_settings)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.quit)
+        view_menu = tk.Menu(menu_bar, tearoff=0)
+        menu_bar.add_cascade(label="View", menu=view_menu)
+        view_menu.add_command(label="Data Logs", command=self.open_data_log_window)
 
     def _create_widgets(self):
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         self.live_trade_tab = ttk.Frame(self.notebook)
         self.backtest_tab = ttk.Frame(self.notebook)
+        self.positions_tab = ttk.Frame(self.notebook)
+        self.orderbook_tab = ttk.Frame(self.notebook)
+        self.tradebook_tab = ttk.Frame(self.notebook)
+
         self.notebook.add(self.live_trade_tab, text='Live Trading')
         self.notebook.add(self.backtest_tab, text='Backtesting')
+        self.notebook.add(self.positions_tab, text='Open Positions')
+        self.notebook.add(self.orderbook_tab, text="Today's Orders")
+        self.notebook.add(self.tradebook_tab, text='Trade Book')
+
         self._create_live_trade_widgets()
         self._create_backtest_widgets()
+        self._create_positions_widgets()
+        self._create_orderbook_widgets()
+        self._create_tradebook_widgets()
 
     def _create_live_trade_widgets(self):
         main_frame = ttk.Frame(self.live_trade_tab, padding="10")
@@ -212,6 +282,29 @@ class TradingApp:
         self.live_sizing_value_entry = ttk.Entry(sizing_frame, width=15)
         self.live_sizing_value_entry.pack(side="left", padx=5, fill="x", expand=True)
         self.live_sizing_value_entry.insert(0, "1")
+
+        self.live_simulation_var = tk.BooleanVar(value=False)
+        simulation_check = ttk.Checkbutton(
+            input_frame, text="Live Simulation (using historical data)",
+            variable=self.live_simulation_var,
+            command=self.toggle_live_simulation_widgets
+        )
+        simulation_check.grid(row=5, column=0, columnspan=2, sticky="w", padx=5, pady=10)
+
+        self.live_simulation_frame = ttk.Frame(input_frame)
+        ttk.Label(self.live_simulation_frame, text="From Date:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.live_sim_start_date_entry = DateEntry(self.live_simulation_frame, date_pattern='yyyy-mm-dd', width=12)
+        self.live_sim_start_date_entry.bind("<Button-1>", lambda e: self.live_sim_start_date_entry.drop_down())
+        self.live_sim_start_date_entry.grid(row=0, column=1, sticky="ew", padx=5, pady=5)
+        ttk.Label(self.live_simulation_frame, text="To Date:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.live_sim_end_date_entry = DateEntry(self.live_simulation_frame, date_pattern='yyyy-mm-dd', width=12)
+        self.live_sim_end_date_entry.bind("<Button-1>", lambda e: self.live_sim_end_date_entry.drop_down())
+        self.live_sim_end_date_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
+
+        ttk.Label(self.live_simulation_frame, text="Speed (x):").grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        self.live_sim_speed_entry = ttk.Entry(self.live_simulation_frame, width=12)
+        self.live_sim_speed_entry.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
+        self.live_sim_speed_entry.insert(0, "1000")
 
         display_frame = ttk.LabelFrame(main_frame, text="Active Trackers", padding="10")
         display_frame.pack(fill=tk.BOTH, expand=True, pady=10)
@@ -311,6 +404,93 @@ class TradingApp:
         self.backtest_log_area = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD, state='disabled', height=10)
         self.backtest_log_area.pack(fill=tk.BOTH, expand=True)
 
+    def _create_positions_widgets(self):
+        main_frame = ttk.Frame(self.positions_tab, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        control_frame = ttk.Frame(main_frame)
+        control_frame.pack(fill=tk.X, pady=5)
+        refresh_button = ttk.Button(control_frame, text="Refresh Positions", command=self.refresh_positions)
+        refresh_button.pack(side=tk.LEFT)
+
+        tree_frame = ttk.LabelFrame(main_frame, text="Current Open Positions", padding="10")
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.positions_tree = ttk.Treeview(
+            tree_frame,
+            columns=("Symbol", "Quantity", "Entry Price", "Strategy"),
+            show="headings"
+        )
+        self.positions_tree.heading("Symbol", text="Symbol")
+        self.positions_tree.heading("Quantity", text="Quantity")
+        self.positions_tree.heading("Entry Price", text="Entry Price")
+        self.positions_tree.heading("Strategy", text="Strategy")
+        self.positions_tree.pack(fill=tk.BOTH, expand=True)
+
+    def _create_orderbook_widgets(self):
+        main_frame = ttk.Frame(self.orderbook_tab, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        control_frame = ttk.Frame(main_frame)
+        control_frame.pack(fill=tk.X, pady=5)
+        self.refresh_orders_button = ttk.Button(control_frame, text="Refresh Order Book",
+                                                command=self.refresh_orderbook)
+        self.refresh_orders_button.pack(side=tk.LEFT)
+
+        tree_frame = ttk.LabelFrame(main_frame, text="Fyers Order Book (Today's Orders)", padding="10")
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.orderbook_tree = ttk.Treeview(
+            tree_frame,
+            columns=("ID", "Symbol", "Qty", "Side", "Type", "Status", "Order Time"),
+            show="headings"
+        )
+        self.orderbook_tree.heading("ID", text="Order ID")
+        self.orderbook_tree.heading("Symbol", text="Symbol")
+        self.orderbook_tree.heading("Qty", text="Qty")
+        self.orderbook_tree.heading("Side", text="Side")
+        self.orderbook_tree.heading("Type", text="Type")
+        self.orderbook_tree.heading("Status", text="Status")
+        self.orderbook_tree.heading("Order Time", text="Order Time")
+
+        # Set column widths
+        for col, width in [("ID", 120), ("Symbol", 150), ("Qty", 50), ("Side", 50),
+                           ("Type", 80), ("Status", 80), ("Order Time", 150)]:
+            self.orderbook_tree.column(col, width=width)
+
+        self.orderbook_tree.pack(fill=tk.BOTH, expand=True)
+
+    def _create_tradebook_widgets(self):
+        main_frame = ttk.Frame(self.tradebook_tab, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        control_frame = ttk.Frame(main_frame)
+        control_frame.pack(fill=tk.X, pady=5)
+        self.refresh_trades_button = ttk.Button(control_frame, text="Refresh Trade Book",
+                                                command=self.refresh_tradebook)
+        self.refresh_trades_button.pack(side=tk.LEFT)
+
+        tree_frame = ttk.LabelFrame(main_frame, text="Fyers Trade Book (Today's Trades)", padding="10")
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.tradebook_tree = ttk.Treeview(
+            tree_frame,
+            columns=("Symbol", "Side", "Qty", "Price", "Order ID", "Trade Time"),
+            show="headings"
+        )
+        self.tradebook_tree.heading("Symbol", text="Symbol")
+        self.tradebook_tree.heading("Side", text="Side")
+        self.tradebook_tree.heading("Qty", text="Qty")
+        self.tradebook_tree.heading("Price", text="Trade Price")
+        self.tradebook_tree.heading("Order ID", text="Order ID")
+        self.tradebook_tree.heading("Trade Time", text="Trade Time")
+
+        for col, width in [("Symbol", 150), ("Side", 50), ("Qty", 50),
+                           ("Price", 80), ("Order ID", 120), ("Trade Time", 150)]:
+            self.tradebook_tree.column(col, width=width)
+
+        self.tradebook_tree.pack(fill=tk.BOTH, expand=True)
+
     def open_settings(self):
         SettingsWindow(self)
 
@@ -323,6 +503,18 @@ class TradingApp:
         if self.symbols_df is None: return messagebox.showerror("Error", "Symbol data file is missing.")
         segment = self.backtest_segment_combobox.get()
         SymbolSearchWindow(self, callback=self.set_backtest_symbol, segment=segment)
+
+    def open_data_log_window(self):
+        if self.data_log_window is None:
+            self.data_log_window = DataLogWindow(self)
+        else:
+            self.data_log_window.lift()
+
+    def toggle_live_simulation_widgets(self):
+        if self.live_simulation_var.get():
+            self.live_simulation_frame.grid(row=6, column=0, columnspan=2, sticky='ew', padx=5)
+        else:
+            self.live_simulation_frame.grid_forget()
 
     def add_symbols_to_tracker_tree(self, symbols):
         strategy_name = self.live_strategy_combobox.get()
@@ -427,22 +619,141 @@ class TradingApp:
         ]
         if not active_trackers:
             return messagebox.showerror("Error", "No trackers configured.")
-        self.live_log_queue.put("GUI: Sending command to start live session...\n")
+
+        self.open_data_log_window()
+
         self.start_button.config(state="disabled")
         self.stop_button.config(state="normal")
         self.remove_button.config(state="disabled")
-        threading.Thread(
-            target=self.engine.start_live_session,
-            args=(active_trackers,),
-            daemon=True
-        ).start()
+
+        if self.live_simulation_var.get():
+            start_date = self.live_sim_start_date_entry.get_date()
+            end_date = self.live_sim_end_date_entry.get_date()
+
+            try:
+                speed = float(self.live_sim_speed_entry.get())
+                if speed < 0: raise ValueError()
+            except ValueError:
+                messagebox.showerror("Input Error", "Simulation speed must be a non-negative number.")
+                self.start_button.config(state="normal")
+                return
+
+            if not all([start_date, end_date]):
+                messagebox.showerror("Input Error", "Please select a start and end date for the simulation.")
+                self.start_button.config(state="normal")
+                self.stop_button.config(state="disabled")
+                self.remove_button.config(state="normal")
+                return
+
+            self.live_log_queue.put("GUI: Sending command to start live simulation...\n")
+            threading.Thread(
+                target=self._run_live_simulation_thread,
+                args=(active_trackers, start_date, end_date, speed),
+                daemon=True
+            ).start()
+        else:
+            self.live_log_queue.put("GUI: Sending command to start live session...\n")
+            threading.Thread(
+                target=self.engine.start_live_session,
+                args=(active_trackers,),
+                daemon=True
+            ).start()
 
     def stop_trading(self):
         self.live_log_queue.put("GUI: Sending command to stop session...\n")
         self.engine.stop_session()
-        self.start_button.config(state="normal")
-        self.stop_button.config(state="disabled")
-        self.remove_button.config(state="normal")
+        # If it was a live session (not a simulation), reset buttons immediately.
+        # If it was a simulation, the simulation thread is responsible for reset.
+        if not self.engine.is_simulation_running:
+            self.start_button.config(state="normal")
+            self.stop_button.config(state="disabled")
+            self.remove_button.config(state="normal")
+
+    def refresh_positions(self):
+        # Clear existing items
+        for item in self.positions_tree.get_children():
+            self.positions_tree.delete(item)
+
+        try:
+            with open(self.engine.order_manager.positions_file, 'r') as f:
+                positions = json.load(f)
+
+            for symbol, details in positions.items():
+                self.positions_tree.insert(
+                    "", "end",
+                    values=(
+                        symbol,
+                        details.get('quantity', 'N/A'),
+                        details.get('entry_price', 'N/A'),
+                        details.get('strategy', 'N/A')
+                    )
+                )
+        except FileNotFoundError:
+            self.live_log_queue.put("[GUI] positions.json not found.\n")
+        except (json.JSONDecodeError, Exception) as e:
+            self.live_log_queue.put(f"[GUI] Error reading positions.json: {e}\n")
+
+    def refresh_orderbook(self):
+        self.refresh_orders_button.config(state="disabled")
+        self.live_log_queue.put("GUI: Fetching order book from Fyers...\n")
+        threading.Thread(target=self._refresh_orderbook_thread, daemon=True).start()
+
+    def _refresh_orderbook_thread(self):
+        orderbook_result = self.engine.get_orderbook()
+
+        def _update_gui():
+            for item in self.orderbook_tree.get_children():
+                self.orderbook_tree.delete(item)
+
+            if orderbook_result.get("status") == "success":
+                orders = orderbook_result.get("data", [])
+                self.live_log_queue.put(f"GUI: Found {len(orders)} order(s).\n")
+                side_map = {1: "BUY", -1: "SELL"}
+                type_map = {1: "LIMIT", 2: "MARKET", 3: "STOP", 4: "STOP-LIMIT"}
+                status_map = {1: "CANCELLED", 2: "TRADED", 4: "TRANSIT", 5: "REJECTED", 6: "PENDING", 7: "EXPIRED"}
+                for order in orders:
+                    self.orderbook_tree.insert("", "end", values=(
+                        order.get('id'), order.get('symbol'), order.get('qty'),
+                        side_map.get(order.get('side'), order.get('side')),
+                        type_map.get(order.get('type'), order.get('type')),
+                        status_map.get(order.get('status'), order.get('status')),
+                        order.get('orderDateTime')))
+            else:
+                self.live_log_queue.put(f"GUI: Failed to fetch order book: {orderbook_result.get('error', 'Unknown')}\n")
+            self.refresh_orders_button.config(state="normal")
+
+        self.root.after(0, _update_gui)
+
+    def refresh_tradebook(self):
+        self.refresh_trades_button.config(state="disabled")
+        self.live_log_queue.put("GUI: Fetching trade book from Fyers...\n")
+        threading.Thread(target=self._refresh_tradebook_thread, daemon=True).start()
+
+    def _refresh_tradebook_thread(self):
+        tradebook_result = self.engine.get_tradebook()
+
+        def _update_gui():
+            for item in self.tradebook_tree.get_children():
+                self.tradebook_tree.delete(item)
+
+            if tradebook_result.get("status") == "success":
+                trades = tradebook_result.get("data", [])
+                self.live_log_queue.put(f"GUI: Found {len(trades)} trade(s).\n")
+                side_map = {1: "BUY", -1: "SELL"}
+                for trade in trades:
+                    self.tradebook_tree.insert("", "end", values=(
+                        trade.get('symbol'),
+                        side_map.get(trade.get('side'), trade.get('side')),
+                        trade.get('tradedQty'),
+                        trade.get('tradePrice'),
+                        trade.get('orderNumber'),
+                        trade.get('tradeTime')
+                    ))
+            else:
+                self.live_log_queue.put(f"GUI: Failed to fetch trade book: {tradebook_result.get('error', 'Unknown')}\n")
+            self.refresh_trades_button.config(state="normal")
+
+        self.root.after(0, _update_gui)
 
     def remove_selected_tracker(self):
         selected_items = self.tree.selection()
@@ -506,6 +817,20 @@ class TradingApp:
 
         self.engine.order_manager = original_om
         self.root.after(0, lambda: self.run_backtest_button.config(state="normal"))
+
+    def _run_live_simulation_thread(self, trackers, start_date, end_date, speed):
+        self.engine.start_live_simulation(trackers, start_date, end_date, speed)
+        # Re-enable buttons when done.
+        self.root.after(0, lambda: self.start_button.config(state="normal"))
+        self.root.after(0, lambda: self.stop_button.config(state="disabled"))
+        self.root.after(0, lambda: self.remove_button.config(state="normal"))
+
+    def _process_data_log_queue(self):
+        while not self.data_log_queue.empty():
+            message = self.data_log_queue.get_nowait()
+            if self.data_log_window:
+                self.data_log_window.update_log(message)
+        self.root.after(100, self._process_data_log_queue)
 
     def _process_live_log_queue(self):
         while not self.live_log_queue.empty():

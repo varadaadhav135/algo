@@ -1,0 +1,7 @@
+{
+    "NSE:ADANIPORTS-EQ": {
+        "quantity": -1,
+        "strategy": "DailyBreakdown",
+        "entry_price": 1437.2
+    }
+}

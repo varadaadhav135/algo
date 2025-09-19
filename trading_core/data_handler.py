@@ -1,6 +1,6 @@
 # trading_bot/trading_core/data_handler.py
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
 
@@ -17,19 +17,21 @@ class LiveDataHandler:
         if self.log_queue:
             self.log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] [Data] {message}\n")
 
-    def on_message(self, msg):
+    def on_message(self, msg, timestamp=None):
         """Offloads the actual processing to a worker thread to keep the WS receiver responsive."""
-        self.executor.submit(self._process_tick, msg)
+        self.executor.submit(self._process_tick, msg, timestamp)
 
-    def _process_tick(self, msg):
+    def _process_tick(self, msg, timestamp=None):
         """The core logic to process a single tick message."""
         try:
             symbol = msg.get('symbol')
-            if symbol and symbol in self.active_strategies and msg.get("ltp"):
-                price = float(msg.get("ltp"))
+            # Check for live price ('ltp') or historical price ('close')
+            price = msg.get("ltp") or msg.get("close")
+            if symbol and symbol in self.active_strategies and price is not None:
                 strategy = self.active_strategies[symbol]
-                # Pass the current time as the tick timestamp for live trading
-                strategy.on_tick(datetime.now(), price)
+                # Pass the provided timestamp, or the current time for live trading
+                tick_timestamp = timestamp or datetime.now()
+                strategy.on_tick(tick_timestamp, msg)
         except Exception as e:
             self._log(f"Error processing tick for {symbol}: {e}")
 
@@ -50,20 +52,35 @@ class BacktestDataHandler:
             self.log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] [Data] {message}\n")
 
     def fetch_data(self, symbol, start_date, end_date, resolution="1"):
-        data = {
-            "symbol": symbol, "resolution": resolution, "date_format": "1",
-            "range_from": start_date.strftime('%Y-%m-%d'),
-            "range_to": end_date.strftime('%Y-%m-%d'),
-            "cont_flag": "1"
-        }
-        response = self.fyers_model.history(data=data)
-        if response and response.get('candles'):
-            df = pd.DataFrame(response['candles'])
-            df.columns = ['date', 'open', 'high', 'low', 'close', 'volume']
-            df['date'] = pd.to_datetime(df['date'], unit='s')
-            df['date'] = df['date'].dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
-            df['date'] = df['date'].dt.tz_localize(None)  # Remove timezone for simplicity
-            df = df.set_index('date')
-            return df
-        self._log(f"Failed to fetch historical data: {response.get('message', 'No data')}")
-        return pd.DataFrame()
+        """
+        Fetches historical data for a given symbol and date range.
+        It iterates day by day to handle API limitations on intraday data ranges.
+        """
+        all_data = []
+        current_date = start_date
+
+        while current_date <= end_date:
+            date_str = current_date.strftime('%Y-%m-%d')
+            data = {
+                "symbol": symbol, "resolution": resolution, "date_format": "1",
+                "range_from": date_str,
+                "range_to": date_str,
+                "cont_flag": "1"
+            }
+            response = self.fyers_model.history(data=data)
+
+            if response and response.get('candles'):
+                df = pd.DataFrame(response['candles'])
+                df.columns = ['date', 'open', 'high', 'low', 'close', 'volume']
+                df['date'] = pd.to_datetime(df['date'], unit='s')
+                df['date'] = df['date'].dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
+                df['date'] = df['date'].dt.tz_localize(None)
+                df = df.set_index('date')
+                all_data.append(df)
+            current_date += timedelta(days=1)
+
+        if not all_data:
+            self._log(f"Failed to fetch any historical data for {symbol} in the given range.")
+            return pd.DataFrame()
+
+        return pd.concat(all_data)

@@ -22,6 +22,25 @@ class Strategy(ABC):
         # --- NEW: Store sizing parameters ---
         self.sizing_type = sizing_type
         self.sizing_value = int(sizing_value)  # Ensure value is an integer
+        self._initialize_state()
+
+    def _initialize_state(self):
+        """
+        Checks if there is an open position for this strategy and symbol,
+        and restores the strategy's state if so.
+        """
+        position = self.order_manager.get_open_position(self.symbol)
+        if position and position.get('strategy') == self.STRATEGY_NAME:
+            # This strategy has an open position, restore state.
+            self._restore_state_from_position(position)
+
+    def _restore_state_from_position(self, position: dict):
+        """
+        Restores strategy-specific state from a persisted position.
+        This method should be overridden by concrete strategies that need
+        to maintain state across restarts.
+        """
+        pass  # Default implementation does nothing.
 
     def _calculate_quantity(self, price: float) -> int:
         """Calculates the trade quantity based on the selected sizing method."""
@@ -40,6 +59,6 @@ class Strategy(ABC):
         return 0  # Default to 0 if sizing type is unknown
 
     @abstractmethod
-    def on_tick(self, timestamp: datetime, price: float):
-        """This method will be called for every new price tick."""
+    def on_tick(self, timestamp: datetime, data: dict):
+        """This method will be called for every new tick data."""
         pass

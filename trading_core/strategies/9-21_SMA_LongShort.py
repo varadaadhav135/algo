@@ -1,4 +1,5 @@
 from datetime import datetime, time
+from trading_core.strategies.base_strategy import Strategy
 
 class NiftySMA921LongShortStrategy(Strategy):
     """Long and Short using 9 & 21 SMA crossover with stop loss and timed exits."""
@@ -18,19 +19,32 @@ class NiftySMA921LongShortStrategy(Strategy):
         self.prices = []
         self.lows = []
         self.highs = []
-        self.in_position = False
-        self.position_side = None  # "long" or "short"
         self.entry_price = None
         self.sl_price_long = None
         self.sl_price_short = None
         self.entry_time = None
+
+    def _restore_state_from_position(self, position: dict):
+        self.entry_price = position.get('entry_price')
 
     def _calc_sma(self, data, period):
         if len(data) < period:
             return None
         return sum(data[-period:]) / period
 
-    def on_tick(self, timestamp: datetime, price: float):
+    def on_tick(self, timestamp: datetime, data: dict):
+        price = data.get('ltp', data.get('close'))
+
+        if not price:
+            return
+
+        position_details = self.order_manager.get_open_position(self.symbol)
+        is_my_trade = position_details and position_details.get('strategy') == self.STRATEGY_NAME
+        current_qty = position_details.get('quantity', 0) if position_details else 0
+
+        if position_details and not is_my_trade:
+            return
+
         self.prices.append(price)
         self.lows.append(price)
         self.highs.append(price)
@@ -41,14 +55,15 @@ class NiftySMA921LongShortStrategy(Strategy):
         sma21 = self._calc_sma(self.prices, self.sma21_len)
 
         # Check if no open position: decide entry
-        if not self.in_position and sma9 and sma21:
+        if current_qty == 0 and sma9 and sma21:
             # Long condition: close > both SMAs
             if price > sma9 and price > sma21:
                 qty = self._calculate_quantity(price)
                 if qty > 0:
-                    self.order_manager.buy(self.symbol, qty, price, self.product_type)
-                    self.in_position = True
-                    self.position_side = "long"
+                    self.order_manager.place_order(
+                        symbol=self.symbol, qty=qty, side=1, order_type=2, timestamp=timestamp,
+                        product_type=self.product_type, strategy_name=self.STRATEGY_NAME, price=price
+                    )
                     self.entry_price = price
                     self.sl_price_long = min(self.lows[-1], price)
                     self.entry_time = timestamp
@@ -56,38 +71,53 @@ class NiftySMA921LongShortStrategy(Strategy):
             elif price < sma9 and price < sma21:
                 qty = self._calculate_quantity(price)
                 if qty > 0:
-                    self.order_manager.sell(self.symbol, qty, price, self.product_type)
-                    self.in_position = True
-                    self.position_side = "short"
+                    self.order_manager.place_order(
+                        symbol=self.symbol, qty=qty, side=-1, order_type=2, timestamp=timestamp,
+                        product_type=self.product_type, strategy_name=self.STRATEGY_NAME, price=price
+                    )
                     self.entry_price = price
                     self.sl_price_short = max(self.highs[-1], price)
                     self.entry_time = timestamp
 
         # Stop loss and exit management for long position
-        if self.in_position and self.position_side == "long" and self.sl_price_long:
+        if current_qty > 0 and self.sl_price_long:
             if price <= self.sl_price_long:
-                qty = self._calculate_quantity(self.entry_price)
-                self.order_manager.sell(self.symbol, qty, price, self.product_type)
+                qty_to_exit = abs(current_qty)
+                self.order_manager.place_order(
+                    symbol=self.symbol, qty=qty_to_exit, side=-1, order_type=2, timestamp=timestamp,
+                    product_type=self.product_type, strategy_name=self.STRATEGY_NAME,
+                    entry_price=self.entry_price, exit_reason="Stop Loss", price=price
+                )
                 self._reset_position()
             elif current_time >= self.exit_time_long:
-                qty = self._calculate_quantity(self.entry_price)
-                self.order_manager.sell(self.symbol, qty, price, self.product_type)
+                qty_to_exit = abs(current_qty)
+                self.order_manager.place_order(
+                    symbol=self.symbol, qty=qty_to_exit, side=-1, order_type=2, timestamp=timestamp,
+                    product_type=self.product_type, strategy_name=self.STRATEGY_NAME,
+                    entry_price=self.entry_price, exit_reason="EOD Exit", price=price
+                )
                 self._reset_position()
 
         # Stop loss and exit management for short position
-        if self.in_position and self.position_side == "short" and self.sl_price_short:
+        if current_qty < 0 and self.sl_price_short:
             if price >= self.sl_price_short:
-                qty = self._calculate_quantity(self.entry_price)
-                self.order_manager.buy(self.symbol, qty, price, self.product_type)
+                qty_to_exit = abs(current_qty)
+                self.order_manager.place_order(
+                    symbol=self.symbol, qty=qty_to_exit, side=1, order_type=2, timestamp=timestamp,
+                    product_type=self.product_type, strategy_name=self.STRATEGY_NAME,
+                    entry_price=self.entry_price, exit_reason="Stop Loss", price=price
+                )
                 self._reset_position()
             elif current_time >= self.exit_time_short:
-                qty = self._calculate_quantity(self.entry_price)
-                self.order_manager.buy(self.symbol, qty, price, self.product_type)
+                qty_to_exit = abs(current_qty)
+                self.order_manager.place_order(
+                    symbol=self.symbol, qty=qty_to_exit, side=1, order_type=2, timestamp=timestamp,
+                    product_type=self.product_type, strategy_name=self.STRATEGY_NAME,
+                    entry_price=self.entry_price, exit_reason="EOD Exit", price=price
+                )
                 self._reset_position()
 
     def _reset_position(self):
-        self.in_position = False
-        self.position_side = None
         self.entry_price = None
         self.sl_price_long = None
         self.sl_price_short = None

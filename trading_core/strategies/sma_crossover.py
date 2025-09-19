@@ -14,10 +14,24 @@ class SMACrossoverStrategy(Strategy):
         self.prices = []
         self.short_sma = None
         self.long_sma = None
-        self.position = 0
         self.entry_price = None
 
-    def on_tick(self, timestamp: datetime, price: float):
+    def _restore_state_from_position(self, position: dict):
+        self.entry_price = position.get('entry_price')
+
+    def on_tick(self, timestamp: datetime, data: dict):
+        price = data.get('ltp', data.get('close'))
+
+        if not price:
+            return
+
+        position_details = self.order_manager.get_open_position(self.symbol)
+        is_my_trade = position_details and position_details.get('strategy') == self.STRATEGY_NAME
+        current_qty = position_details.get('quantity', 0) if position_details else 0
+
+        if position_details and not is_my_trade:
+            return
+
         self.prices.append(price)
         if len(self.prices) < self.long_window:
             return
@@ -36,45 +50,40 @@ class SMACrossoverStrategy(Strategy):
         golden_cross = prev_short_sma <= prev_long_sma and self.short_sma > self.long_sma
         death_cross = prev_short_sma >= prev_long_sma and self.short_sma < self.long_sma
 
-        qty_to_trade = self._calculate_quantity(price)
-
-        if self.position == 1 and death_cross:
-            if qty_to_trade <= 0: return
+        if current_qty > 0 and death_cross:
+            qty_to_exit = abs(current_qty)
             self.order_manager.place_order(
-                symbol=self.symbol, qty=qty_to_trade, side=-1, order_type=2, timestamp=timestamp,
+                symbol=self.symbol, qty=qty_to_exit, side=-1, order_type=2, timestamp=timestamp,
                 product_type=self.product_type, strategy_name=self.STRATEGY_NAME,
                 entry_price=self.entry_price, exit_reason="SMA Crossover", price=price
             )
-            self.position = 0
             self.entry_price = None
             return
 
-        if self.position == -1 and golden_cross:
-            if qty_to_trade <= 0: return
+        if current_qty < 0 and golden_cross:
+            qty_to_exit = abs(current_qty)
             self.order_manager.place_order(
-                symbol=self.symbol, qty=qty_to_trade, side=1, order_type=2, timestamp=timestamp,
+                symbol=self.symbol, qty=qty_to_exit, side=1, order_type=2, timestamp=timestamp,
                 product_type=self.product_type, strategy_name=self.STRATEGY_NAME,
                 entry_price=self.entry_price, exit_reason="SMA Crossover", price=price
             )
-            self.position = 0
             self.entry_price = None
             return
 
-        if self.position == 0:
+        if current_qty == 0:
+            qty_to_trade = self._calculate_quantity(price)
             if qty_to_trade <= 0: return
             if golden_cross:
                 self.order_manager.place_order(
                     symbol=self.symbol, qty=qty_to_trade, side=1, order_type=2, timestamp=timestamp,
                     product_type=self.product_type, strategy_name=self.STRATEGY_NAME,
-                    entry_price=price, price=price
+                    price=price
                 )
-                self.position = 1
                 self.entry_price = price
             elif death_cross:
                 self.order_manager.place_order(
                     symbol=self.symbol, qty=qty_to_trade, side=-1, order_type=2, timestamp=timestamp,
                     product_type=self.product_type, strategy_name=self.STRATEGY_NAME,
-                    entry_price=price, price=price
+                    price=price
                 )
-                self.position = -1
                 self.entry_price = price
