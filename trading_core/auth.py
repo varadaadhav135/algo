@@ -16,8 +16,13 @@ class FyersAuthClient:
     Handles the Fyers authentication process, including token validation,
     refreshing, and the full login flow if necessary.
     """
+    # original
     BASE_URL = "https://api-t2.fyers.in/vagator/v2"
     BASE_URL_2 = "https://api-t1.fyers.in/api/v3"
+    # changed
+    # BASE_URL = "https://api-t1.fyers.in/vagator/v2"
+    # BASE_URL_2 = "https://api-t1.fyers.in/api/v3"
+
 
     def __init__(self, fy_id, app_id, app_type, app_secret, totp_key, pin, redirect_uri, token_file="tokens.json"):
         self.fy_id = fy_id
@@ -28,7 +33,11 @@ class FyersAuthClient:
         self.pin = pin
         self.redirect_uri = redirect_uri
         self.token_file = Path(token_file)
+        # original 
         self.app_id_hash = hashlib.sha256(f"{app_id}-{app_type}:{app_secret}".encode('utf-8')).hexdigest()
+        # changed
+        # self.app_id_hash = hashlib.sha256(f"{app_id}:{app_secret}".encode('utf-8')).hexdigest()
+
 
     def _post(self, url, payload, headers=None, expected_status=200):
         resp = requests.post(url, json=payload, headers=headers or {})
@@ -74,10 +83,15 @@ class FyersAuthClient:
         except Exception as e:
             print(f"Token refresh failed: {e}")
             return None
-
+    # original
     def send_login_otp(self):
         data = self._post(f"{self.BASE_URL}/send_login_otp", {"fy_id": self.fy_id, "app_id": "2"})
         return data["request_key"]
+
+    # changed
+    # def send_login_otp(self):
+    #     data = self._post(f"{self.BASE_URL}/send_login_otp", {"fy_id": self.fy_id, "app_id":self.app_id})
+    #     return data["request_key"] 
 
     def generate_totp(self):
         return pyotp.TOTP(self.totp_key).now()
